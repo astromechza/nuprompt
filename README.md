@@ -3,6 +3,8 @@
 My new bash prompt:
 
 ```
+eval $(cargo run bash)
+# expands into ...
 PS0='$(nuprompt ps0 $$)'
 PROMPT_COMMAND='eval $(nuprompt ps1 $$ $?)'
 ```
