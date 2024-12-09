@@ -1,7 +1,7 @@
 use std::env::args_os;
 use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::io::{stdout, IsTerminal, Write};
+use std::io::{stdin, IsTerminal, Write};
 use std::ops::Deref;
 use std::os::unix::prelude::OsStrExt;
 use std::path::PathBuf;
@@ -91,7 +91,7 @@ fn ps1(raw_pid: &OsStr, exit_code: &OsStr) -> Result<(), anyhow::Error> {
     debug!("found user: {:?}", username);
 
     // prepare the buffered writer
-    let buf_writer = BufferWriter::stdout(if stdout().is_terminal() { ColorChoice::Auto } else { ColorChoice::Never});
+    let buf_writer = BufferWriter::stdout(if stdin().is_terminal() { ColorChoice::Auto } else { ColorChoice::Never});
     let mut buffer = buf_writer.buffer();
     buffer.write_all(b"PS1='[")?;
     if let Some(exit_code) = exit_code {
