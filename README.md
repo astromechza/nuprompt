@@ -3,9 +3,13 @@
 My new bash prompt:
 
 ```
-eval $(cargo run bash)
+# Install via cargo
+cargo install --git https://github.com/astromechza/nuprompt
 
-# Expands into PS0 and PROMPT_COMMAND. PS0 captures the previous command start time, while PROMPT_COMMAND generates a
+# The following is added to the bash rc or profile:
+eval $(nuprompt bash)
+
+# This expands into PS0 and PROMPT_COMMAND. PS0 captures the previous command start time, while PROMPT_COMMAND generates a
 # PS1 line with the exit code, duration, user, cwd, and git information.
 
 PS0='$(nuprompt ps0 $$)'
@@ -13,6 +17,10 @@ PROMPT_COMMAND='eval $(nuprompt ps1 $$ $?)'
 ```
 
 ![img.png](img.png)
+
+- `$NUPROMPT_RUST_LOG=debug` will display debug logging information on stderr
+- `$NUPROMPT_NO_GIT=true` will disable git status detection which may increase performance if you're operating in a large git repo
+- `$NO_COLOR=true` will disable coloured output (this happens automatically if stdin is not a terminal)
 
 ## Background
 
