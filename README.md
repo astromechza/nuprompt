@@ -4,10 +4,15 @@ My new bash prompt:
 
 ```
 eval $(cargo run bash)
-# expands into ...
+
+# Expands into PS0 and PROMPT_COMMAND. PS0 captures the previous command start time, while PROMPT_COMMAND generates a
+# PS1 line with the exit code, duration, user, cwd, and git information.
+
 PS0='$(nuprompt ps0 $$)'
 PROMPT_COMMAND='eval $(nuprompt ps1 $$ $?)'
 ```
+
+![img.png](img.png)
 
 ## Background
 
