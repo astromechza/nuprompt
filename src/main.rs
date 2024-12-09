@@ -24,6 +24,10 @@ fn main() -> Result<(), anyhow::Error> {
     let pid_arg = args_os().nth(2);
     let extra_arg = args_os().nth(3);
     match subcommand {
+        Some(p) if p.eq("bash") && n_args == 2 => {
+            println!("PS0='$(nuprompt ps0 $$)'\nPROMPT_COMMAND='eval $(nuprompt ps1 $$ $?)'");
+            Ok(())
+        },
         Some(p) if p.eq("ps0") && n_args == 3 => ps0(pid_arg.unwrap().deref()),
         Some(p) if p.eq("ps1") && n_args == 4 => ps1(pid_arg.unwrap().deref(), extra_arg.unwrap().deref()),
         _ => Err(anyhow!("nuprompt {} must be executed as either 'nuprompt ps0 <pid>' or 'nuprompt ps1 <pid> <exit code>'", VERSION))
