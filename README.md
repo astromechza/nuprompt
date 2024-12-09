@@ -1,8 +1,8 @@
 # nuprompt
 
-My new bash prompt:
+My new bash prompt. Replacing <https://github.com/astromechza/prompt>.
 
-```
+```shell
 # Install via cargo
 cargo install --git https://github.com/astromechza/nuprompt
 
@@ -21,6 +21,20 @@ PROMPT_COMMAND='eval $(nuprompt ps1 $$ $?)'
 - `$NUPROMPT_RUST_LOG=debug` will display debug logging information on stderr
 - `$NUPROMPT_NO_GIT=true` will disable git status detection which may increase performance if you're operating in a large git repo
 - `$NO_COLOR=true` will disable coloured output (this happens automatically if stdin is not a terminal)
+
+## FAQ
+
+### Why write a binary? why not use the `PS1` formatting characters and pure bash?
+
+Because I want to.
+
+### Why no cargo crate and binary releases?
+
+I'm the only intended audience. I can install or build it via `cargo install --git` when needed.
+
+### Why do you use bash and not another shell?
+
+Tried ZSH in the past. Got too distracted customising it. Wanted something standard that was more likely to be installed everywhere.
 
 ## Background
 
@@ -45,9 +59,3 @@ Firstly, lets assume that `PS1` is set by `PROMPT_COMMAND` in some way. Either, 
 Then, we need to capture the time of the previous command. We can do this by using `PS0` to store the start time of a command in a temporary file associated with the shell process id. The bash special parameter `${$}` can be used to capture the PID and then write this to a temporary file. Then in our main prompt, we'll try to read this file and use the contents to calculate an elapsed time.
 
 This leaves us with the form of `PROMPT_COMMAND='eval $(nuprompt ps1 ${$} ${?})` (with `${?}` capturing the previous exit code, and `${$}` capturing the shell process id). One thing I did in the previous version of my prompt was to insert a newline if the prompt wasn't at the left hand margin. This could happen if the previous command output _didn't_ have a newline itself, however, after using this for some time I found that it wasn't clever enough and would frequently break commands if I typed them too fast.
-
-## FAQ
-
-### Why write a binary? why not use the `PS1` formatting characters and pure bash?
-
-Because I want to.
