@@ -1,7 +1,7 @@
 use std::env::args_os;
 use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::io::{stdout, BufWriter, Write};
+use std::io::{stdout, IsTerminal, Write};
 use std::ops::Deref;
 use std::os::unix::prelude::OsStrExt;
 use std::path::PathBuf;
@@ -10,14 +10,19 @@ use anyhow::anyhow;
 use coarsetime::Duration;
 use git2::{Repository, Status, StatusOptions};
 use log::debug;
+use termcolor::{BufferWriter, Color, ColorChoice, ColorSpec, WriteColor};
 
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+const RUST_LOG_FILTER_ENVVAR: &str = "NUPROMPT_RUST_LOG";
+const NO_GIT_ENVVAR: &str = "NUPROMPT_NO_GIT";
+const PWD_ENVVAR: &str = "PWD";
+const HOME_ENVVAR: &str = "HOME";
 
 fn main() -> Result<(), anyhow::Error> {
     // we output some debug logs which can be turned on if needed.
-    env_logger::init_from_env(env_logger::Env::default().filter("NUPROMPT_RUST_LOG"));
+    env_logger::init_from_env(env_logger::Env::default().filter(RUST_LOG_FILTER_ENVVAR));
 
-    // we handle args in a very basic way since this is not intended to be a interactive or iterative
+    // we handle args in a very basic way since this is not intended to be an interactive or iterative
     // CLI UX.
     let n_args = args_os().len();
     let subcommand = args_os().nth(1);
@@ -39,6 +44,7 @@ fn ps0(raw_pid: &OsStr) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
+
 fn ps1(raw_pid: &OsStr, exit_code: &OsStr) -> Result<(), anyhow::Error> {
 
     // expect a status code as the first positional arg
@@ -47,7 +53,7 @@ fn ps1(raw_pid: &OsStr, exit_code: &OsStr) -> Result<(), anyhow::Error> {
 
     // cwd comes from libc or from the env var
     let possible_cwd = std::env::current_dir().ok()
-        .or_else(|| std::env::var_os("PWD").map(PathBuf::from));
+        .or_else(|| std::env::var_os(PWD_ENVVAR).map(PathBuf::from));
 
     // try and read the start time of the previous command from a file on the system
     let elapsed: Option<Duration> = read_elapsed_time(raw_pid)
@@ -60,8 +66,9 @@ fn ps1(raw_pid: &OsStr, exit_code: &OsStr) -> Result<(), anyhow::Error> {
     let start_time = coarsetime::Instant::now();
     let (cwd, git_bits): (PathBuf, Option<GitBits>) = match possible_cwd {
         Some(p) => {
-            match std::env::var_os("NUPROMPT_NO_GIT") {
-                Some(_) => {
+            match std::env::var_os(NO_GIT_ENVVAR) {
+                Some(_) => (shorted_path_buf(p), None),
+                None => {
                     debug!("looking for git repo from working directory: {:?}", p);
                     let ceil: &[PathBuf] = &[];
                     match Repository::open_ext(&p, git2::RepositoryOpenFlags::empty(), ceil) {
@@ -72,7 +79,6 @@ fn ps1(raw_pid: &OsStr, exit_code: &OsStr) -> Result<(), anyhow::Error> {
                         }
                     }
                 }
-                None => (shorted_path_buf(p), None)
             }
         },
         None => (PathBuf::new(), None),
@@ -85,28 +91,32 @@ fn ps1(raw_pid: &OsStr, exit_code: &OsStr) -> Result<(), anyhow::Error> {
     debug!("found user: {:?}", username);
 
     // prepare the buffered writer
-    let mut stdout_lock = stdout().lock();
-    let mut buf_writer = BufWriter::new(&mut stdout_lock);
-
-    buf_writer.write_all(b"PS1='[")?;
+    let buf_writer = BufferWriter::stdout(if stdout().is_terminal() { ColorChoice::Auto } else { ColorChoice::Never});
+    let mut buffer = buf_writer.buffer();
+    buffer.write_all(b"PS1='[")?;
     if let Some(exit_code) = exit_code {
-        buf_writer.write_all(exit_code.as_bytes())?;
-        buf_writer.write_all(b" ")?;
+        buffer.set_color(ColorSpec::new().set_fg(Some(Color::Red)))?;
+        buffer.write_all(exit_code.as_bytes())?;
+        buffer.write_all(b" ")?;
     }
     if let Some(elapsed) = elapsed {
-        write!(buf_writer, "{:.2}s ", elapsed.as_f64())?;
+        buffer.set_color(ColorSpec::new().set_fg(Some(Color::Cyan)))?;
+        write!(buffer, "{:.2}s ", elapsed.as_f64())?;
     }
-    buf_writer.write_all(username.as_bytes())?;
-    buf_writer.write_all(b" ")?;
+    buffer.set_color(ColorSpec::new().set_fg(Some(Color::Cyan)).set_bold(true).set_intense(true))?;
+    buffer.write_all(username.as_bytes())?;
+    buffer.write_all(b" ")?;
     if let Some(git_bits) = git_bits {
-        write_with_escaped_quote(git_bits.head_ref.as_bytes(), &mut buf_writer)?;
-        git_bits.write_elements(&mut buf_writer)?;
-        buf_writer.write_all(b" ")?;
+        buffer.set_color(ColorSpec::new().set_fg(Some(Color::Yellow)).set_intense(true))?;
+        write_with_escaped_quote(git_bits.head_ref.as_bytes(), &mut buffer)?;
+        buffer.set_color(&ColorSpec::default())?;
+        git_bits.write_elements(&mut buffer)?;
+        buffer.write_all(b" ")?;
     }
-
-    write_with_escaped_quote(cwd.as_os_str().as_bytes(), &mut buf_writer)?;
-    buf_writer.write_all(b" > '")?;
-    buf_writer.flush()?;
+    buffer.set_color(&ColorSpec::default())?;
+    write_with_escaped_quote(cwd.as_os_str().as_bytes(), &mut buffer)?;
+    buffer.write_all(b" > '")?;
+    buf_writer.print(&buffer)?;
     Ok(())
 }
 
@@ -205,7 +215,7 @@ impl GitBits {
 
 /// Replace a prefix of $HOME with ~ in the given path.
 fn shorted_path_buf(input: PathBuf) -> PathBuf {
-    match std::env::var("HOME").map(PathBuf::from) {
+    match std::env::var(HOME_ENVVAR).map(PathBuf::from) {
         Ok(h) if input.starts_with(&h) => PathBuf::from_str("~").unwrap().join(input.strip_prefix(h).unwrap()),
         _ => input,
     }
