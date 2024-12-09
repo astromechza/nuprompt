@@ -1,37 +1,74 @@
 use std::env::args_os;
-use std::error::Error;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
+use std::fs;
 use std::io::{stdout, BufWriter, Write};
+use std::ops::Deref;
 use std::os::unix::prelude::OsStrExt;
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::time::Instant;
+use anyhow::anyhow;
+use coarsetime::Duration;
 use git2::{Repository, Status, StatusOptions};
 use log::debug;
 
-fn main() -> Result<(), Box<dyn Error>> {
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+fn main() -> Result<(), anyhow::Error> {
     // we output some debug logs which can be turned on if needed.
     env_logger::init_from_env(env_logger::Env::default().filter("NUPROMPT_RUST_LOG"));
-    
+
+    // we handle args in a very basic way since this is not intended to be a interactive or iterative
+    // CLI UX.
+    let n_args = args_os().len();
+    let subcommand = args_os().nth(1);
+    let pid_arg = args_os().nth(2);
+    let extra_arg = args_os().nth(3);
+    match subcommand {
+        Some(p) if p.eq("ps0") && n_args == 3 => ps0(pid_arg.unwrap().deref()),
+        Some(p) if p.eq("ps1") && n_args == 4 => ps1(pid_arg.unwrap().deref(), extra_arg.unwrap().deref()),
+        _ => Err(anyhow!("nuprompt {} must be executed as either 'nuprompt ps0 <pid>' or 'nuprompt ps1 <pid> <exit code>'", VERSION))
+    }
+}
+
+fn ps0(raw_pid: &OsStr) -> Result<(), anyhow::Error> {
+    write_start_time(raw_pid)?;
+    Ok(())
+}
+
+fn ps1(raw_pid: &OsStr, exit_code: &OsStr) -> Result<(), anyhow::Error> {
+
     // expect a status code as the first positional arg
-    let exit_code = args_os().nth(1).filter(|a| !a.eq("0"));
-    
+    let exit_code = Some(exit_code)
+        .filter(|a| !a.is_empty() && !a.eq(&OsStr::new("0")));
+
     // cwd comes from libc or from the env var
     let possible_cwd = std::env::current_dir().ok()
         .or_else(|| std::env::var_os("PWD").map(PathBuf::from));
-    
+
+    // try and read the start time of the previous command from a file on the system
+    let elapsed: Option<Duration> = read_elapsed_time(raw_pid)
+        .map_or_else(|e| {
+            debug!("error reading elapsed time from pid file: {}", e);
+            None
+        }, Some);
+
     // try and parse git status if were in a repo
-    let start_time = Instant::now();
+    let start_time = coarsetime::Instant::now();
     let (cwd, git_bits): (PathBuf, Option<GitBits>) = match possible_cwd {
         Some(p) => {
-            debug!("looking for git repo from working directory: {:?}", p);
-            let ceil: &[PathBuf] = &[];
-            match Repository::open_ext(&p, git2::RepositoryOpenFlags::empty(), ceil) {
-                Ok(r) => (shorted_path_buf(p), Some(GitBits::from_repo(&r)?)),
-                Err(e) => {
-                    debug!("could not open repository: {:?}", e);
-                    (shorted_path_buf(p), None)
+            match std::env::var_os("NUPROMPT_NO_GIT") {
+                Some(_) => {
+                    debug!("looking for git repo from working directory: {:?}", p);
+                    let ceil: &[PathBuf] = &[];
+                    match Repository::open_ext(&p, git2::RepositoryOpenFlags::empty(), ceil) {
+                        Ok(r) => (shorted_path_buf(p), Some(GitBits::from_repo(&r)?)),
+                        Err(e) => {
+                            debug!("could not open repository: {:?}", e);
+                            (shorted_path_buf(p), None)
+                        }
+                    }
                 }
+                None => (shorted_path_buf(p), None)
             }
         },
         None => (PathBuf::new(), None),
@@ -46,11 +83,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     // prepare the buffered writer
     let mut stdout_lock = stdout().lock();
     let mut buf_writer = BufWriter::new(&mut stdout_lock);
-    
+
     buf_writer.write_all(b"PS1='[")?;
     if let Some(exit_code) = exit_code {
         buf_writer.write_all(exit_code.as_bytes())?;
         buf_writer.write_all(b" ")?;
+    }
+    if let Some(elapsed) = elapsed {
+        write!(buf_writer, "{:.2}s ", elapsed.as_f64())?;
     }
     buf_writer.write_all(username.as_bytes())?;
     buf_writer.write_all(b" ")?;
@@ -59,7 +99,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         git_bits.write_elements(&mut buf_writer)?;
         buf_writer.write_all(b" ")?;
     }
-    
+
     write_with_escaped_quote(cwd.as_os_str().as_bytes(), &mut buf_writer)?;
     buf_writer.write_all(b" > '")?;
     buf_writer.flush()?;
@@ -74,6 +114,28 @@ fn write_with_escaped_quote(input: &[u8], mut w: impl Write) -> Result<(), std::
         }
         w.write_all(x)?;
     }
+    Ok(())
+}
+
+fn prev_start_file_path(raw_pid: &OsStr) -> PathBuf {
+    std::env::temp_dir().join(format!("NUPROMPT_{}_prev_start", raw_pid.to_string_lossy()))
+}
+
+fn read_elapsed_time(raw_pid: &OsStr) -> Result<Duration, anyhow::Error> {
+    let tf = prev_start_file_path(raw_pid);
+    let contents = fs::read(&tf)?;
+    fs::remove_file(&tf)?;
+    let ticks = u64::from_be_bytes(contents[..8].try_into()?);
+    let now_ticks = coarsetime::Instant::now().as_ticks();
+    debug!("read start time from pid file: {} now={}", ticks, now_ticks);
+    Ok(Duration::from_ticks(now_ticks - ticks))
+}
+
+fn write_start_time(raw_pid: &OsStr) -> Result<(), anyhow::Error>{
+    let tf = prev_start_file_path(raw_pid);
+    let now_ticks = coarsetime::Instant::now().as_ticks();
+    fs::write(&tf, now_ticks.to_be_bytes())?;
+    debug!("wrote start time to pid file: now={}", now_ticks);
     Ok(())
 }
 
