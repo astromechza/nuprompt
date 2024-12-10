@@ -6,7 +6,7 @@ use std::ops::Deref;
 use std::os::unix::prelude::OsStrExt;
 use std::path::PathBuf;
 use std::str::FromStr;
-use anyhow::anyhow;
+use anyhow::{anyhow, Context};
 use coarsetime::Duration;
 use git2::{Repository, Status, StatusOptions};
 use log::debug;
@@ -33,8 +33,8 @@ fn main() -> Result<(), anyhow::Error> {
             println!("PS0='$(nuprompt ps0 $$)'\nPROMPT_COMMAND='eval $(nuprompt ps1 $$ $?)'");
             Ok(())
         },
-        Some(p) if p.eq("ps0") && n_args == 3 => ps0(pid_arg.unwrap().deref()),
-        Some(p) if p.eq("ps1") && n_args == 4 => ps1(pid_arg.unwrap().deref(), extra_arg.unwrap().deref()),
+        Some(p) if p.eq("ps0") && n_args == 3 => ps0(pid_arg.unwrap().deref()).context("nuprompt ps0"),
+        Some(p) if p.eq("ps1") && n_args == 4 => ps1(pid_arg.unwrap().deref(), extra_arg.unwrap().deref()).context("nuprompt ps1"),
         _ => Err(anyhow!("nuprompt {} must be executed as either 'nuprompt ps0 <pid>' or 'nuprompt ps1 <pid> <exit code>'", VERSION))
     }
 }
@@ -115,7 +115,7 @@ fn ps1(raw_pid: &OsStr, exit_code: &OsStr) -> Result<(), anyhow::Error> {
     }
     buffer.set_color(&ColorSpec::default())?;
     write_with_escaped_quote(cwd.as_os_str().as_bytes(), &mut buffer)?;
-    buffer.write_all(b" > '")?;
+    buffer.write_all(b" \xE2\x9F\xAB '")?;
     buf_writer.print(&buffer)?;
     Ok(())
 }
@@ -164,7 +164,12 @@ struct GitBits {
 impl GitBits {
 
     fn from_repo(r: &Repository) -> Result<GitBits, anyhow::Error> {
-        let short_ref = r.head()?.shorthand().unwrap().to_owned();
+        let short_ref = r.head()
+            .map(|h| h.shorthand().unwrap().to_owned())
+            .unwrap_or_else(|e| {
+                debug!("error reading head ref: {}", e);
+               String::from("NO HEAD")
+            });
         let mut gb = GitBits{
             head_ref: short_ref,
             index_modified: false,
