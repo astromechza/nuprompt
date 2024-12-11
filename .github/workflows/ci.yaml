@@ -17,6 +17,7 @@ jobs:
     - uses: actions-rust-lang/setup-rust-toolchain@v1
     - run: cargo build --release
     - run: cargo clippy
+    - run: git diff --exit-code
   release:
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
@@ -30,8 +31,9 @@ jobs:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
         set -exu
-        if gh release view $(cargo read-manifest | jq .version); then
+        version=$(cargo read-manifest | jq -r .version)
+        if gh release view ${version}; then
           echo "release already exists"
         else
-          gh release create $(cargo read-manifest | jq -r .version) -t "$(cargo read-manifest | jq .version)" --generate-notes
+          gh release create ${version} -t ${version} --generate-notes
         fi
