@@ -1,6 +1,12 @@
 [package]
 name = "nuprompt"
+<<<<<<< ours
 version = "0.4.4"
+||||||| ancestor
+version = "0.4.2"
+=======
+version = "0.4.3"
+>>>>>>> theirs
 edition = "2021"
 
 [dependencies]
