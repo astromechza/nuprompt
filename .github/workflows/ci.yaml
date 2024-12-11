@@ -5,15 +5,33 @@ on:
   push:
     branches:
       - main
-permissions:
-  contents: write
 env:
   CARGO_TERM_COLOR: always
 jobs:
   ci:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
     - uses: actions/checkout@v4
     - uses: actions-rust-lang/setup-rust-toolchain@v1
     - run: cargo build --release
     - run: cargo clippy
+  release:
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    needs: ci
+    permissions:
+      contents: write
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions-rust-lang/setup-rust-toolchain@v1
+    - env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        set -exu
+        if gh release view $(cargo read-manifest | jq .version); then
+          echo "release already exists"
+        else
+          gh release create $(cargo read-manifest | jq -r .version) -t "$(cargo read-manifest | jq .version)" --generate-notes
+        fi
