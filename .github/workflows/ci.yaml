@@ -1,39 +1,57 @@
 name: ci
 on:
+  # Run on any pull request updates for any branches
   pull_request:
     branches: [ "*" ]
+  # Run on any new commits on main after PRs are merged.
   push:
     branches:
       - main
 env:
+  # We'd like to see colour in the GH workflow output
   CARGO_TERM_COLOR: always
 jobs:
   ci:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
     steps:
     - uses: actions/checkout@v4
     - uses: actions-rust-lang/setup-rust-toolchain@v1
-    - run: cargo build --release
-    - run: cargo clippy
+    # Run the unit tests if any exist and ensure that the lock file doesn't change. We run the tests first because they
+    # provide more important feedback than the linting.
+    - run: cargo test --locked
+    # Then lint the code. Allow the code to enable/disable more checks.
+    - run: cargo clippy --locked --no-deps
+    # Build the final binary on this branch to ensure that it does build on the current architecture.
+    - run: cargo build --release --locked
+    # Finally, ensure that no artefacts have been created or changed. This is less necessary now that we use --locked,
+    # but there may be other side effects we want to avoid.
     - run: git diff --exit-code
+    # To improve our changes of success, do a dry-run publish of the crate.
+    - run: cargo publish --dry-run
   release:
     runs-on: ubuntu-latest
+    # Only run the release job on main refs.
     if: github.ref == 'refs/heads/main'
     needs: ci
+    # We need content write permissions to cut new releases and tags.
     permissions:
       contents: write
     steps:
     - uses: actions/checkout@v4
     - uses: actions-rust-lang/setup-rust-toolchain@v1
+    # The step is fairly straight forward. We set GH_TOKEN (because gh cli uses this) and then the script creates a
+    # a new release with generated notes if it does not exist.
     - env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
         set -exu
         version=$(cargo read-manifest | jq -r .version)
-        if gh release view ${version}; then
+        if gh release view "${version}"; then
           echo "release already exists"
         else
-          gh release create ${version} -t ${version} --generate-notes
+          gh release create "${version}" -t "${version}" --generate-notes
         fi
+    # Publish the crate to match the new release.
+    - env:
+        CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      run: cargo publish

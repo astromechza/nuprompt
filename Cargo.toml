@@ -1,7 +1,12 @@
 [package]
 name = "nuprompt"
 version = "0.4.4"
+description = "A personal bash prompt."
+repository = "https://github.com/astromechza/nuprompt"
 edition = "2021"
+license-file = "LICENSE"
+categories = ["command-line-interface"]
+keywords = ["prompt"]
 
 [dependencies]
 git2 = { version = "0.19.0", default-features = false, features = ["vendored-libgit2"] }
