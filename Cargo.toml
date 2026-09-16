@@ -1,6 +1,6 @@
 [package]
 name = "nuprompt"
-version = "0.4.7"
+version = "0.5.0"
 rust-version = "1.85.0"
 description = "A personal bash prompt."
 repository = "https://github.com/astromechza/nuprompt"
