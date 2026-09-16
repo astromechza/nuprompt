@@ -10,7 +10,7 @@ use anyhow::{anyhow, Context};
 use coarsetime::Duration;
 use git2::{Repository, Status, StatusOptions};
 use log::debug;
-use termcolor::{BufferWriter, Color, ColorChoice, ColorSpec, WriteColor};
+use termcolor::{Buffer, BufferWriter, Color, ColorChoice, ColorSpec, WriteColor};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const RUST_LOG_FILTER_ENVVAR: &str = "NUPROMPT_RUST_LOG";
@@ -95,25 +95,25 @@ fn ps1(raw_pid: &OsStr, exit_code: &OsStr) -> Result<(), anyhow::Error> {
     let mut buffer = buf_writer.buffer();
     buffer.write_all(b"PS1='[")?;
     if let Some(exit_code) = exit_code {
-        buffer.set_color(ColorSpec::new().set_fg(Some(Color::Red)))?;
+        set_color_wrapped(&mut buffer, ColorSpec::new().set_fg(Some(Color::Red)))?;
         buffer.write_all(exit_code.as_bytes())?;
         buffer.write_all(b" ")?;
     }
     if let Some(elapsed) = elapsed {
-        buffer.set_color(ColorSpec::new().set_fg(Some(Color::Cyan)))?;
+        set_color_wrapped(&mut buffer, ColorSpec::new().set_fg(Some(Color::Cyan)))?;
         write!(buffer, "{:.2}s ", elapsed.as_f64())?;
     }
-    buffer.set_color(ColorSpec::new().set_fg(Some(Color::Cyan)).set_bold(true).set_intense(true))?;
+    set_color_wrapped(&mut buffer, ColorSpec::new().set_fg(Some(Color::Cyan)).set_bold(true).set_intense(true))?;
     buffer.write_all(username.as_bytes())?;
     buffer.write_all(b" ")?;
     if let Some(git_bits) = git_bits {
-        buffer.set_color(ColorSpec::new().set_fg(Some(Color::Yellow)).set_intense(true))?;
+        set_color_wrapped(&mut buffer, ColorSpec::new().set_fg(Some(Color::Yellow)).set_intense(true))?;
         write_with_escaped_quote(git_bits.head_ref.as_bytes(), &mut buffer)?;
-        buffer.set_color(&ColorSpec::default())?;
+        set_color_wrapped(&mut buffer, &ColorSpec::default())?;
         git_bits.write_elements(&mut buffer)?;
         buffer.write_all(b" ")?;
     }
-    buffer.set_color(&ColorSpec::default())?;
+    set_color_wrapped(&mut buffer, &ColorSpec::default())?;
     write_with_escaped_quote(cwd.as_os_str().as_bytes(), &mut buffer)?;
     buffer.write_all(b" \xE2\x9F\xAB '")?;
     buf_writer.print(&buffer)?;
@@ -128,6 +128,22 @@ fn write_with_escaped_quote(input: &[u8], mut w: impl Write) -> Result<(), std::
         }
         w.write_all(x)?;
     }
+    Ok(())
+}
+
+/// Emit a color change wrapped in readline's `\[` `\]` non-printing markers so
+/// bash computes the prompt width correctly; without them readline counts the
+/// escape bytes as visible characters and corrupts line-wrapping and history
+/// recall. termcolor emits bare SGR sequences and knows nothing about readline,
+/// so the wrapping is the caller's responsibility. No-op when color is disabled,
+/// to avoid emitting empty `\[\]` pairs.
+fn set_color_wrapped(buffer: &mut Buffer, spec: &ColorSpec) -> Result<(), std::io::Error> {
+    if !buffer.supports_color() {
+        return Ok(());
+    }
+    buffer.write_all(b"\\[")?;
+    buffer.set_color(spec)?;
+    buffer.write_all(b"\\]")?;
     Ok(())
 }
 
@@ -264,5 +280,36 @@ mod tests {
     fn parse_stored_ticks_truncated_errs() {
         // fewer than 8 bytes must error, not panic on the slice.
         assert!(parse_stored_ticks(&[0, 1, 2, 3]).is_err());
+    }
+
+    const ESC: u8 = 0x1b;
+
+    /// When color is enabled, the emitted SGR sequence must be wrapped in
+    /// readline's `\[` `\]` markers, and every ESC byte must fall inside them.
+    #[test]
+    fn set_color_wrapped_wraps_escapes() {
+        let mut buffer = Buffer::ansi();
+        set_color_wrapped(&mut buffer, ColorSpec::new().set_fg(Some(Color::Cyan)).set_bold(true))
+            .unwrap();
+        let out = buffer.as_slice();
+
+        // sanity: termcolor actually emitted a non-printing sequence
+        assert!(out.contains(&ESC), "expected an ANSI escape in {out:?}");
+        assert!(out.starts_with(b"\\["), "must open with \\[: {out:?}");
+        assert!(out.ends_with(b"\\]"), "must close with \\]: {out:?}");
+
+        // no ESC byte may leak outside the \[ ... \] markers
+        let inner = &out[2..out.len() - 2];
+        assert!(!inner.contains(&b'\\'), "no stray markers inside: {inner:?}");
+        assert!(!out[..2].contains(&ESC) && !out[out.len() - 2..].contains(&ESC));
+    }
+
+    /// With color disabled the helper emits nothing, so we never leave empty
+    /// `\[\]` pairs in the prompt.
+    #[test]
+    fn set_color_wrapped_noop_without_color() {
+        let mut buffer = Buffer::no_color();
+        set_color_wrapped(&mut buffer, ColorSpec::new().set_fg(Some(Color::Cyan))).unwrap();
+        assert!(buffer.as_slice().is_empty());
     }
 }
