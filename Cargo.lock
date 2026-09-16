@@ -1347,7 +1347,7 @@ checksum = "9737e026353e5cd0736f98eddae28665118eb6f6600902a7f50db585621fecb6"
 
 [[package]]
 name = "nuprompt"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "coarsetime",
