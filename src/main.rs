@@ -248,8 +248,14 @@ impl GitBits {
 
 /// Replace a prefix of $HOME with ~ in the given path.
 fn shorted_path_buf(input: PathBuf) -> PathBuf {
-    match std::env::var(HOME_ENVVAR).map(PathBuf::from) {
-        Ok(h) if input.starts_with(&h) => PathBuf::from_str("~").unwrap().join(input.strip_prefix(h).unwrap()),
+    shorted_path_buf_with_home(input, std::env::var(HOME_ENVVAR).ok())
+}
+
+/// Replace a prefix of the given home directory with ~ in the given path. Split from
+/// `shorted_path_buf` so the logic can be tested without touching the HOME env var.
+fn shorted_path_buf_with_home(input: PathBuf, home: Option<String>) -> PathBuf {
+    match home.map(PathBuf::from) {
+        Some(h) if input.starts_with(&h) => PathBuf::from_str("~").unwrap().join(input.strip_prefix(h).unwrap()),
         _ => input,
     }
 }
@@ -257,6 +263,69 @@ fn shorted_path_buf(input: PathBuf) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn escaped(input: &[u8]) -> String {
+        let mut buf: Vec<u8> = Vec::new();
+        write_with_escaped_quote(input, &mut buf).unwrap();
+        String::from_utf8(buf).unwrap()
+    }
+
+    #[test]
+    fn test_write_with_escaped_quote() {
+        assert_eq!(escaped(b""), "");
+        assert_eq!(escaped(b"no quotes here"), "no quotes here");
+        assert_eq!(escaped(b"it's"), "it'\\''s");
+        assert_eq!(escaped(b"a'b'c"), "a'\\''b'\\''c");
+        assert_eq!(escaped(b"'lead"), "'\\''lead");
+        assert_eq!(escaped(b"trail'"), "trail'\\''");
+        assert_eq!(escaped(b"'"), "'\\''");
+    }
+
+    fn shorted(input: &str, home: Option<&str>) -> String {
+        shorted_path_buf_with_home(PathBuf::from(input), home.map(String::from))
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    #[test]
+    fn test_shorted_path_buf_with_home() {
+        // prefix replaced with ~
+        assert_eq!(shorted("/home/ben/projects", Some("/home/ben")), "~/projects");
+        // exact home: prefix stripped leaves an empty remainder, so ~ joins with "" -> "~/"
+        assert_eq!(shorted("/home/ben", Some("/home/ben")), "~/");
+        // non-matching path left unchanged
+        assert_eq!(shorted("/etc/passwd", Some("/home/ben")), "/etc/passwd");
+        // no home set leaves path unchanged
+        assert_eq!(shorted("/home/ben/x", None), "/home/ben/x");
+    }
+
+    fn elements(index_modified: bool, worktree_modified: bool, untracked_files: bool) -> String {
+        let gb = GitBits {
+            head_ref: String::from("main"),
+            index_modified,
+            worktree_modified,
+            untracked_files,
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        gb.write_elements(&mut buf).unwrap();
+        String::from_utf8(buf).unwrap()
+    }
+
+    #[test]
+    fn test_git_bits_write_elements() {
+        // nothing written when all false
+        assert_eq!(elements(false, false, false), "");
+        // single flags
+        assert_eq!(elements(true, false, false), ":s");
+        assert_eq!(elements(false, true, false), ":d");
+        assert_eq!(elements(false, false, true), ":u");
+        // pairs (order is always s, d, u)
+        assert_eq!(elements(true, true, false), ":sd");
+        assert_eq!(elements(true, false, true), ":su");
+        assert_eq!(elements(false, true, true), ":du");
+        // all three
+        assert_eq!(elements(true, true, true), ":sdu");
+    }
 
     #[test]
     fn parse_stored_ticks_valid() {
