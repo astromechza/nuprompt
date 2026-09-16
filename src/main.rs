@@ -91,6 +91,15 @@ fn ps1(raw_pid: &OsStr, exit_code: &OsStr) -> Result<(), anyhow::Error> {
     debug!("found user: {:?}", username);
 
     // prepare the buffered writer
+    //
+    // We gate colour on stdin rather than stdout. Our stdout is always the pipe of the enclosing
+    // `eval $(nuprompt ps1 $$ $?)` command substitution, so `stdout().is_terminal()` would always be
+    // false and force colour off - the escape codes we emit are meant to end up inside the resulting
+    // PS1 string, so we do want them when the shell is interactive. stdin (like stderr) is inherited
+    // straight from the shell and is a terminal exactly when the session is interactive, which is the
+    // real question here. This mirrors termcolor's own recommended pattern of downgrading Auto to
+    // Never when stdin is not a terminal. ColorChoice::Auto still honours NO_COLOR and TERM=dumb for
+    // us (termcolor only consults those, not the stream's tty status, when building a Buffer).
     let buf_writer = BufferWriter::stdout(if stdin().is_terminal() { ColorChoice::Auto } else { ColorChoice::Never});
     let mut buffer = buf_writer.buffer();
     buffer.write_all(b"PS1='[")?;
