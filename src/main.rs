@@ -135,14 +135,25 @@ fn prev_start_file_path(raw_pid: &OsStr) -> PathBuf {
     std::env::temp_dir().join(format!("NUPROMPT_{}_prev_start", raw_pid.to_string_lossy()))
 }
 
+/// Parse the stored tick count from the prev-start file contents. The file holds a u64 encoded as
+/// 8 big-endian bytes, but a truncated or empty file must not panic on the slice.
+fn parse_stored_ticks(contents: &[u8]) -> Result<u64, anyhow::Error> {
+    let bytes = contents
+        .get(..8)
+        .ok_or_else(|| anyhow!("prev start file too short: {} bytes", contents.len()))?;
+    Ok(u64::from_be_bytes(bytes.try_into()?))
+}
+
 fn read_elapsed_time(raw_pid: &OsStr) -> Result<Duration, anyhow::Error> {
     let tf = prev_start_file_path(raw_pid);
     let contents = fs::read(&tf)?;
     fs::remove_file(&tf)?;
-    let ticks = u64::from_be_bytes(contents[..8].try_into()?);
+    let ticks = parse_stored_ticks(&contents)?;
     let now_ticks = coarsetime::Instant::now().as_ticks();
     debug!("read start time from pid file: {} now={}", ticks, now_ticks);
-    Ok(Duration::from_ticks(now_ticks - ticks))
+    // saturating_sub guards against a stored tick from the future or a clock reset, which would
+    // otherwise underflow (panic in debug, bogus huge duration in release).
+    Ok(Duration::from_ticks(now_ticks.saturating_sub(ticks)))
 }
 
 fn write_start_time(raw_pid: &OsStr) -> Result<(), anyhow::Error>{
@@ -165,7 +176,8 @@ impl GitBits {
 
     fn from_repo(r: &Repository) -> Result<GitBits, anyhow::Error> {
         let short_ref = r.head()
-            .map(|h| h.shorthand().unwrap().to_owned())
+            // shorthand() returns None when the ref name is not valid UTF-8; fall back rather than panic.
+            .map(|h| h.shorthand().unwrap_or("?").to_owned())
             .unwrap_or_else(|e| {
                 debug!("error reading head ref: {}", e);
                String::from("NO HEAD")
@@ -223,5 +235,34 @@ fn shorted_path_buf(input: PathBuf) -> PathBuf {
     match std::env::var(HOME_ENVVAR).map(PathBuf::from) {
         Ok(h) if input.starts_with(&h) => PathBuf::from_str("~").unwrap().join(input.strip_prefix(h).unwrap()),
         _ => input,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_stored_ticks_valid() {
+        let bytes = 42u64.to_be_bytes();
+        assert_eq!(parse_stored_ticks(&bytes).unwrap(), 42);
+    }
+
+    #[test]
+    fn parse_stored_ticks_extra_bytes_ignored() {
+        let mut bytes = 7u64.to_be_bytes().to_vec();
+        bytes.push(0xFF);
+        assert_eq!(parse_stored_ticks(&bytes).unwrap(), 7);
+    }
+
+    #[test]
+    fn parse_stored_ticks_empty_errs() {
+        assert!(parse_stored_ticks(&[]).is_err());
+    }
+
+    #[test]
+    fn parse_stored_ticks_truncated_errs() {
+        // fewer than 8 bytes must error, not panic on the slice.
+        assert!(parse_stored_ticks(&[0, 1, 2, 3]).is_err());
     }
 }
