@@ -7,8 +7,8 @@ use std::os::unix::prelude::OsStrExt;
 use std::path::PathBuf;
 use std::str::FromStr;
 use anyhow::{anyhow, Context};
+use gix::bstr::ByteSlice;
 use coarsetime::Duration;
-use git2::{Repository, Status, StatusOptions};
 use log::debug;
 use termcolor::{Buffer, BufferWriter, Color, ColorChoice, ColorSpec, WriteColor};
 
@@ -70,8 +70,9 @@ fn ps1(raw_pid: &OsStr, exit_code: &OsStr) -> Result<(), anyhow::Error> {
                 Some(_) => (shorted_path_buf(p), None),
                 None => {
                     debug!("looking for git repo from working directory: {:?}", p);
-                    let ceil: &[PathBuf] = &[];
-                    match Repository::open_ext(&p, git2::RepositoryOpenFlags::empty(), ceil) {
+                    // gix::discover walks up parent directories to find the repo,
+                    // matching git2's Repository::open_ext upward discovery.
+                    match gix::discover(&p) {
                         Ok(r) => (shorted_path_buf(p), Some(GitBits::from_repo(&r)?)),
                         Err(e) => {
                             debug!("could not open repository: {:?}", e);
@@ -200,38 +201,80 @@ struct GitBits {
 
 impl GitBits {
 
-    fn from_repo(r: &Repository) -> Result<GitBits, anyhow::Error> {
-        let short_ref = r.head()
-            // shorthand() returns None when the ref name is not valid UTF-8; fall back rather than panic.
-            .map(|h| h.shorthand().unwrap_or("?").to_owned())
-            .unwrap_or_else(|e| {
+    fn from_repo(r: &gix::Repository) -> Result<GitBits, anyhow::Error> {
+        // Reproduce git2's head().shorthand() semantics exactly:
+        //   * a normal branch  -> the short ref name (e.g. "main")
+        //   * a detached HEAD  -> "HEAD" (git2 resolves HEAD to a direct ref)
+        //   * an unborn branch -> "NO HEAD" (git2 returns an error here)
+        // shorten() can hold non-UTF-8 bytes, in which case we fall back to "?"
+        // rather than panic, mirroring the old shorthand().unwrap_or("?").
+        let head_ref = match r.head() {
+            Ok(h) => match h.kind {
+                gix::head::Kind::Symbolic(reference) => {
+                    reference.name.shorten().to_str().unwrap_or("?").to_owned()
+                }
+                gix::head::Kind::Detached { .. } => String::from("HEAD"),
+                gix::head::Kind::Unborn(_) => String::from("NO HEAD"),
+            },
+            Err(e) => {
                 debug!("error reading head ref: {}", e);
-               String::from("NO HEAD")
-            });
+                String::from("NO HEAD")
+            }
+        };
         let mut gb = GitBits{
-            head_ref: short_ref,
+            head_ref,
             index_modified: false,
             worktree_modified: false,
             untracked_files: false,
         };
-        let statuses = r.statuses(Some(StatusOptions::new()
-            .include_ignored(false)
-            .include_untracked(true)
-            .exclude_submodules(true)
-            .include_unreadable(false)))?;
-        let wt_modified: Status = Status::WT_MODIFIED | Status::WT_DELETED | Status::WT_TYPECHANGE | Status::WT_RENAMED;
-        let index_modified: Status = Status::INDEX_NEW | Status::INDEX_MODIFIED | Status::INDEX_TYPECHANGE | Status::INDEX_RENAMED | Status::INDEX_DELETED;
-        for x in statuses.iter() {
-            debug!("git status {:?}: {:?}", x.path(), x.status());
-            let st = x.status();
-            if st.intersects(wt_modified) {
-                gb.worktree_modified = true;
+        // Status scan reduced to three booleans, matching the old git2 mapping:
+        //   index_modified    <- any HEAD-vs-index (staged) change
+        //   worktree_modified <- any index-vs-worktree modification/rewrite
+        //   untracked_files   <- any untracked (not ignored) file on disk
+        // Submodules are excluded (Ignore::All) and ignored files are not listed,
+        // matching exclude_submodules(true) + include_ignored(false).
+        // The old git2 code passed include_untracked(true) explicitly, which
+        // overrode any git config. gix instead honours status.showUntrackedFiles,
+        // and a value of "no" makes status() tear down the directory walk (setting
+        // dirwalk_options to None). Once that happens, untracked_files() below is a
+        // documented no-op, so re-establish a default walk first to keep output
+        // identical regardless of the user's config.
+        let iter = r.status(gix::progress::Discard)?
+            .index_worktree_options_mut(|opts| {
+                if opts.dirwalk_options.is_none() {
+                    opts.dirwalk_options = r.dirwalk_options().ok();
+                }
+            })
+            .untracked_files(gix::status::UntrackedFiles::Files)
+            .index_worktree_submodules(gix::status::Submodule::Given {
+                ignore: gix::submodule::config::Ignore::All,
+                check_dirty: false,
+            })
+            .into_iter(None)?;
+        for item in iter {
+            let item = item?;
+            debug!("git status: {:?}", item);
+            match item {
+                gix::status::Item::TreeIndex(_) => gb.index_modified = true,
+                gix::status::Item::IndexWorktree(iw) => match iw {
+                    gix::status::index_worktree::Item::Modification { .. } => {
+                        gb.worktree_modified = true;
+                    }
+                    gix::status::index_worktree::Item::Rewrite { .. } => {
+                        gb.worktree_modified = true;
+                    }
+                    gix::status::index_worktree::Item::DirectoryContents { entry, .. } => {
+                        if entry.status == gix::dir::entry::Status::Untracked {
+                            gb.untracked_files = true;
+                        }
+                    }
+                },
             }
-            if st.intersects(index_modified) {
-                gb.index_modified = true;
-            }
-            if st.contains(Status::WT_NEW) {
-                gb.untracked_files = true;
+            // Only the three booleans matter, so stop walking as soon as all are
+            // set. This is the hot path (the prompt renders on every command) and
+            // large dirty repos can otherwise enumerate thousands of entries.
+            if gb.index_modified && gb.worktree_modified && gb.untracked_files {
+                break;
             }
         }
         Ok(gb)
@@ -390,5 +433,150 @@ mod tests {
         let mut buffer = Buffer::no_color();
         set_color_wrapped(&mut buffer, ColorSpec::new().set_fg(Some(Color::Cyan))).unwrap();
         assert!(buffer.as_slice().is_empty());
+    }
+
+    // --- GitBits::from_repo integration tests ---------------------------------
+    //
+    // gix is pre-1.0 with a churning status API, so these lock in the exact
+    // head-ref and three-boolean semantics we depend on against future upgrades.
+    // They shell out to the real `git` to build repos, then open them with gix.
+
+    use std::path::Path;
+    use std::process::Command;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// Unique scratch directory, git-initialised, with deterministic identity so
+    /// commits work without relying on the host's git config.
+    fn tmp_repo() -> PathBuf {
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "nuprompt-test-{}-{}",
+            std::process::id(),
+            n
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        git(&dir, &["init", "-q", "-b", "main"]);
+        git(&dir, &["config", "user.name", "t"]);
+        git(&dir, &["config", "user.email", "t@t"]);
+        dir
+    }
+
+    fn git(dir: &Path, args: &[&str]) {
+        let ok = Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .status()
+            .expect("git must be on PATH")
+            .success();
+        assert!(ok, "git {:?} failed", args);
+    }
+
+    fn write(dir: &Path, name: &str, contents: &str) {
+        fs::write(dir.join(name), contents).unwrap();
+    }
+
+    fn bits(dir: &Path) -> GitBits {
+        let repo = gix::discover(dir).expect("discover repo");
+        GitBits::from_repo(&repo).expect("from_repo")
+    }
+
+    #[test]
+    fn from_repo_clean_has_branch_and_no_flags() {
+        let d = tmp_repo();
+        git(&d, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        let b = bits(&d);
+        assert_eq!(b.head_ref, "main");
+        assert!(!b.index_modified && !b.worktree_modified && !b.untracked_files);
+    }
+
+    #[test]
+    fn from_repo_staged_only_sets_index_modified() {
+        let d = tmp_repo();
+        git(&d, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        write(&d, "f", "a");
+        git(&d, &["add", "f"]);
+        let b = bits(&d);
+        assert!(b.index_modified);
+        assert!(!b.worktree_modified);
+        assert!(!b.untracked_files);
+    }
+
+    #[test]
+    fn from_repo_worktree_modified_sets_worktree_flag() {
+        let d = tmp_repo();
+        write(&d, "f", "a");
+        git(&d, &["add", "f"]);
+        git(&d, &["commit", "-q", "-m", "init"]);
+        write(&d, "f", "a-changed");
+        let b = bits(&d);
+        assert!(!b.index_modified);
+        assert!(b.worktree_modified);
+        assert!(!b.untracked_files);
+    }
+
+    #[test]
+    fn from_repo_untracked_sets_untracked_flag() {
+        let d = tmp_repo();
+        git(&d, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        write(&d, "new", "x");
+        let b = bits(&d);
+        assert!(!b.index_modified);
+        assert!(!b.worktree_modified);
+        assert!(b.untracked_files);
+    }
+
+    #[test]
+    fn from_repo_all_three_flags() {
+        let d = tmp_repo();
+        write(&d, "tracked", "a");
+        git(&d, &["add", "tracked"]);
+        git(&d, &["commit", "-q", "-m", "init"]);
+        write(&d, "staged", "s");
+        git(&d, &["add", "staged"]);
+        write(&d, "tracked", "a-changed");
+        write(&d, "untracked", "u");
+        let b = bits(&d);
+        assert!(b.index_modified && b.worktree_modified && b.untracked_files);
+    }
+
+    #[test]
+    fn from_repo_ignored_files_are_excluded() {
+        let d = tmp_repo();
+        write(&d, ".gitignore", "ign\n");
+        git(&d, &["add", ".gitignore"]);
+        git(&d, &["commit", "-q", "-m", "init"]);
+        write(&d, "ign", "junk");
+        let b = bits(&d);
+        assert!(!b.untracked_files, "ignored file must not count as untracked");
+        assert!(!b.index_modified && !b.worktree_modified);
+    }
+
+    #[test]
+    fn from_repo_detached_head_reads_as_head() {
+        let d = tmp_repo();
+        git(&d, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        git(&d, &["checkout", "-q", "--detach", "HEAD"]);
+        assert_eq!(bits(&d).head_ref, "HEAD");
+    }
+
+    #[test]
+    fn from_repo_unborn_head_reads_as_no_head() {
+        let d = tmp_repo();
+        // freshly init'd, no commit yet -> unborn branch
+        assert_eq!(bits(&d).head_ref, "NO HEAD");
+    }
+
+    #[test]
+    fn from_repo_discovers_from_subdirectory() {
+        let d = tmp_repo();
+        git(&d, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        write(&d, "untracked", "u");
+        let nested = d.join("a").join("b");
+        fs::create_dir_all(&nested).unwrap();
+        let b = bits(&nested);
+        assert_eq!(b.head_ref, "main");
+        assert!(b.untracked_files);
     }
 }
